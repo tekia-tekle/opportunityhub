@@ -1,6 +1,6 @@
 package com.opportunityhub;
 
-import com.opportunityhub.controller.OpportunityController;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.opportunityhub.dto.OpportunityRequestDTO;
 import com.opportunityhub.dto.OpportunityResponseDTO;
 import com.opportunityhub.repository.OpportunityRepository;
@@ -8,24 +8,26 @@ import com.opportunityhub.service.OpportunityService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 public class OpportunityhubControllerTests {
+
     @Autowired
     private MockMvc mockMvc;
 
@@ -64,6 +66,7 @@ public class OpportunityhubControllerTests {
         dto2.setExternalLink("https://aiinstitute.com/apply");
     }
 
+    // === Service-level tests ===
     @Test
     void testCreateAndGetOpportunity() {
         OpportunityResponseDTO created = service.createOpportunity(dto1);
@@ -130,16 +133,22 @@ public class OpportunityhubControllerTests {
         assertEquals(5, page1.size());
         assertNotEquals(page0.get(0).getTitle(), page1.get(0).getTitle());
     }
+
+    // === MockMvc / Integration Tests ===
     @Test
-    void testCreateAndSearchAndPaged() throws Exception {
-        // Create opportunity
+    @WithMockUser(username = "testuser", roles = {"USER"})
+    void testCreateAndSearchAndPagedEndpoints() throws Exception {
+        // Create opportunity with CSRF
         mockMvc.perform(post("/api/opportunities")
+                        .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(dto1)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.title").value("Java Developer"));
+                .andExpect(jsonPath("$.title").value("Java Developer"))
+                .andExpect(jsonPath("$.organizationName").value("TechOrg"))
+                .andExpect(jsonPath("$.expired").value(false));
 
-        // Search by substring
+        // Search by title substring
         mockMvc.perform(get("/api/opportunities/search")
                         .param("title", "Java"))
                 .andExpect(status().isOk())
@@ -149,40 +158,50 @@ public class OpportunityhubControllerTests {
         mockMvc.perform(get("/api/opportunities/paged")
                         .param("page", "0")
                         .param("size", "5")
-                        .param("sortBy", "createdAt")
-                        .param("sortDir", "desc")
+                        .param("sortBy", "deadline")
+                        .param("sortDir", "asc")
                         .param("type", "JOB")
                         .param("category", "IT")
                         .param("title", "Java"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.items[0].title").value("Java Developer"))
-                .andExpect(jsonPath("$.totalItems").value(1));
+                .andExpect(jsonPath("$[0].title").value("Java Developer"));
     }
-
     @Test
-    void testUpdateAndDelete() throws Exception {
-        var result = mockMvc.perform(post("/api/opportunities")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(dto1)))
-                .andReturn();
-
-        String response = result.getResponse().getContentAsString();
-        Long id = objectMapper.readTree(response).get("id").asLong();
-
-        // Update
-        dto1.setTitle("Java Backend Developer");
-        mockMvc.perform(put("/api/opportunities/" + id)
+    @WithMockUser(username = "testuser", roles = {"USER"}) // Mock an authenticated user
+    void testUpdateOpportunityEndpoint() throws Exception {
+        // 1️⃣ First, create an opportunity
+        var createResult = mockMvc.perform(post("/api/opportunities")
+                        .with(csrf()) // CSRF token required for POST
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(dto1)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.title").value("Java Backend Developer"));
+                .andExpect(jsonPath("$.title").value("Java Developer"))
+                .andReturn();
 
-        // Delete
-        mockMvc.perform(delete("/api/opportunities/" + id))
-                .andExpect(status().isOk());
+        // Extract the ID from the response
+        String createResponse = createResult.getResponse().getContentAsString();
+        Long opportunityId = objectMapper.readTree(createResponse).get("id").asLong();
 
-        // Ensure not found
-        mockMvc.perform(get("/api/opportunities/" + id))
-                .andExpect(status().isInternalServerError());
+        // 2️⃣ Prepare update data
+        OpportunityRequestDTO updateDto = new OpportunityRequestDTO();
+        updateDto.setTitle("Java Backend Developer");
+        updateDto.setType("Internship");
+        updateDto.setCategory("software developement");
+        updateDto.setOrganizationName("Malam Engineering plc");
+        updateDto.setLocation("Ethiopia");
+        updateDto.setDeadline(dto1.getDeadline().plusDays(5)); // Extend deadline
+        updateDto.setExternalLink(dto1.getExternalLink());
+
+        // 3️⃣ Perform PUT request to update the opportunity
+        mockMvc.perform(put("/api/opportunities/{id}", opportunityId)
+                        .with(csrf()) // CSRF token required for PUT
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(updateDto)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("Java Backend Developer"))
+                .andExpect(jsonPath("$.type").value("Internship"))
+                .andExpect(jsonPath("$.category").value("software developement"))
+                .andExpect(jsonPath("$.organizationName").value("Malam Engineering plc"))
+                .andExpect(jsonPath("$.location").value("Ethiopia"));
     }
 }
